@@ -1,0 +1,45 @@
+league_id: 28555
+
+user_map:
+  147553: Salmon
+  147552: Mitesh
+  147545: Phil
+  147547: Marcus
+  147550: TomH
+  147549: Dan
+  147548: Bipin
+
+traitor_teams:
+  Mitesh: MCI
+  Marcus: MUN
+  Dan: LIV
+  Salmon: TOT
+  Bipin: FUL
+  Phil: None
+  TomH: LIV
+
+cup:
+  Qualifiers (GW30):
+    - Mitesh
+    - Marcus
+    - Kieran
+    - Dan
+    - Salmon
+    - Bipin
+    - Phil
+    - TomH
+    - Rich
+  Quarter Finals (GW32):
+    - - Mitesh
+      - Salmon
+    - - Phil
+      - TomH
+    - - Bipin
+      - Rich
+    - - Dan
+      - Kieran
+  Semi Finals (GW34):
+    - - Rich
+      - Dan
+    - - Salmon
+      - TomH

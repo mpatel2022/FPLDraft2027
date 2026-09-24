@@ -20,4 +20,5 @@ dependencies = [
     "plotly==6.2.0",
     "colorlover==0.3.0",
     "requests==2.32.3",
+    "PyYAML==6.0.2",
 ]

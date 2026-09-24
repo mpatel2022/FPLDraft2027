@@ -9,14 +9,23 @@ import requests
 import plotly.express as px
 import pickle
 import os
+from pathlib import Path
+import yaml
 
 # league id found by going to the end point: https://draft.premierleague.com/api/bootstrap-dynamic
-league_id = 8918
 url_all = 'https://draft.premierleague.com/api/bootstrap-static'
 # LOCAL_DIR = "/home/mpatel99/FPLDraft2026"
 LOCAL_DIR = "."
 
-refresh_data = False
+refresh_data = True
+
+BASE_DIR = Path(__file__).resolve().parent
+CONFIG_PATH = BASE_DIR / '2027' / 'config.yaml'
+
+with CONFIG_PATH.open('r', encoding='utf-8') as config_file:
+    config = yaml.safe_load(config_file) or {}
+
+league_id = config.get('league_id', 8918)
 
 IMAGES_LOCATION = 'assets\\'
 
@@ -25,43 +34,12 @@ colour_white = "white"
 colour_black = "#121212"
 transparent = "rgba(0, 0, 0, 0)"
 
-USER_MAP = {
-    77347:'Salmon',
-    71339:'Mitesh',
-    36507:'Phil',
-    102583:'Marcus',
-    136961:'TomH',
-    37121:'Kieran',
-    109666:'Dan',
-    108014:'Bipin',
-    137445:'Rich',
-}
-
+USER_MAP = {int(user_id): user_name for user_id, user_name in config.get('user_map', {}).items()}
 user_ids = list(USER_MAP.keys())
 user_names = [USER_MAP[user_id] for user_id in user_ids]
 
-TRAITOR_TEAMS = {
-    'Mitesh':'MCI',
-    'Marcus':'MUN',
-    'Kieran':'ARS',
-    'Dan':'LIV',
-    'Salmon':'TOT',
-    'Bipin':'FUL',
-    'Phil':'None',
-    'TomH':'LIV',
-    'Rich':'ARS'
-}
-
-CUP = {
-    'Qualifiers (GW30)': ['Mitesh', 'Marcus', 'Kieran', 'Dan', 
-                   'Salmon', 'Bipin', 'Phil', 'TomH', 'Rich'],
-    'Quarter Finals (GW32)': [('Mitesh', 'Salmon'), 
-                       ('Phil', 'TomH'),
-                       ('Bipin', 'Rich'),
-                       ('Dan', 'Kieran')],
-    'Semi Finals (GW34)': [('Rich', 'Dan'),
-                           ('Salmon', 'TomH')],    
-}
+TRAITOR_TEAMS = config.get('traitor_teams', {})
+CUP = config.get('cup', {})
 
 
 def discrete_background_color_bins(df, n_bins=5, columns='all', scale='Blues'):

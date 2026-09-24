@@ -8,19 +8,25 @@ import datetime
 import requests
 import plotly.express as px
 import pickle
-import os
 from pathlib import Path
+import truststore
 import yaml
+
+# Use the OS certificate store so HTTPS works behind TLS-scanning antivirus (e.g. AVG)
+truststore.inject_into_ssl()
+
+# Season year - config and all generated pickle files live in this folder
+SEASON_YEAR = '2027'
 
 # league id found by going to the end point: https://draft.premierleague.com/api/bootstrap-dynamic
 url_all = 'https://draft.premierleague.com/api/bootstrap-static'
-# LOCAL_DIR = "/home/mpatel99/FPLDraft2026"
-LOCAL_DIR = "."
 
 refresh_data = True
 
 BASE_DIR = Path(__file__).resolve().parent
-CONFIG_PATH = BASE_DIR / '2027' / 'config.yaml'
+DATA_DIR = BASE_DIR / SEASON_YEAR
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+CONFIG_PATH = DATA_DIR / 'config.yaml'
 
 with CONFIG_PATH.open('r', encoding='utf-8') as config_file:
     config = yaml.safe_load(config_file) or {}
@@ -425,7 +431,7 @@ if refresh_data:
     r = requests.get(url_all)
     all_data = r.json()
 
-    with open(f'{LOCAL_DIR}/metadata.pickle', 'wb') as handle:
+    with open(DATA_DIR / 'metadata.pickle', 'wb') as handle:
         pickle.dump(all_data, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
     # Get the team logos and store in resources
@@ -438,7 +444,7 @@ if refresh_data:
         save_image_data(shirt_logos_url, shirt_logo_name, IMAGES_LOCATION)
         save_image_data(team_badges_url, f'{team_code}.webp', IMAGES_LOCATION)        
 
-with open(f'{LOCAL_DIR}/metadata.pickle', 'rb') as handle:
+with open(DATA_DIR / 'metadata.pickle', 'rb') as handle:
     all_data = pickle.load(handle)    
 
 next_gameweek = all_data['events']['next']
@@ -493,17 +499,17 @@ if refresh_data:
         for i in np.arange(data_length):
             player_history = player_history + [pd.Series(player_data_json[i])]
     player_history = pd.concat(player_history,axis=1).T.rename(columns={'event':'gameweek'})        
-    player_history.to_pickle('player_history.pickle')    
+    player_history.to_pickle(DATA_DIR / 'player_history.pickle')    
 
     url_league = 'https://draft.premierleague.com/api/league/{}/details'.format(league_id)
     r = requests.get(url_league)
     league_data = r.json()
-    with open(f'{LOCAL_DIR}/league_data.pickle', 'wb') as handle:
+    with open(DATA_DIR / 'league_data.pickle', 'wb') as handle:
         pickle.dump(league_data, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
     for gameweek in gameweeks:
-        filename = f'team_positions_history_gw{gameweek}.pickle'
-        if not os.path.exists(filename):
+        team_positions_path = DATA_DIR / f'team_positions_history_gw{gameweek}.pickle'
+        if not team_positions_path.exists():
             team_positions_array = []
             for user_id in user_ids:
                 url_team = 'https://draft.premierleague.com/api/entry/{}/event/{}'.format(user_id, gameweek)
@@ -517,18 +523,18 @@ if refresh_data:
                 team_positions_array.append(team_positions)
             team_positions_history = pd.concat(team_positions_array,axis=1).T
             team_positions_history = team_positions_history.set_index(['user_id','gameweek']).stack().reset_index().rename(columns={'level_2':'position',0:'element'})
-            team_positions_history.to_pickle(f'team_positions_history_gw{gameweek}.pickle')
+            team_positions_history.to_pickle(team_positions_path)
 
 
-with open(f'{LOCAL_DIR}/league_data.pickle', 'rb') as handle:
+with open(DATA_DIR / 'league_data.pickle', 'rb') as handle:
     league_data = pickle.load(handle)    
 
-with open(f'{LOCAL_DIR}/player_history.pickle', 'rb') as handle:
+with open(DATA_DIR / 'player_history.pickle', 'rb') as handle:
     player_df = pickle.load(handle)    
 
 team_array = []
 for gameweek in gameweeks:
-    with open(f'{LOCAL_DIR}/team_positions_history_gw{gameweek}.pickle', 'rb') as handle:
+    with open(DATA_DIR / f'team_positions_history_gw{gameweek}.pickle', 'rb') as handle:
         team_array.append(pickle.load(handle))    
 
 team_df = pd.concat(team_array)

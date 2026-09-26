@@ -21,7 +21,7 @@ SEASON_YEAR = '2027'
 # league id found by going to the end point: https://draft.premierleague.com/api/bootstrap-dynamic
 url_all = 'https://draft.premierleague.com/api/bootstrap-static'
 
-refresh_data = True
+refresh_data = False
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / SEASON_YEAR
@@ -586,20 +586,21 @@ app.layout = html.Div([
     html.Div([
         html.H2(f"FPL Draft {SEASON_YEAR}", style={"textAlign": "center", "color": "white", "flex": "1"}),
         html.Button(
-            "🔄 Refresh Data",
+            "↻ Refresh",
             id="refresh-button",
             n_clicks=0,
             style={
                 "position": "absolute",
                 "right": "20px",
                 "top": "20px",
-                "padding": "8px 16px",
-                "backgroundColor": "#4CAF50",
-                "color": "white",
-                "border": "none",
-                "borderRadius": "4px",
+                "padding": "4px 12px",
+                "backgroundColor": "transparent",
+                "color": "#999",
+                "border": "1px solid #555",
+                "borderRadius": "3px",
                 "cursor": "pointer",
-                "fontSize": "14px"
+                "fontSize": "12px",
+                "fontWeight": "normal"
             }
         )
     ], style={"position": "relative", "paddingTop": "40px"}),

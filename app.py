@@ -581,11 +581,32 @@ gameweek_options = ['All'] + sorted(merged_df["Gameweek"].unique(), reverse=True
 # 🎨 App Layout
 # -------------------------------
 app.layout = html.Div([
-    html.H2("FPL Draft 2025/26", style={"textAlign": "center", "color": "white"}),
+    dcc.Location(id="url", refresh=False),
+
+    html.Div([
+        html.H2(f"FPL Draft {SEASON_YEAR}", style={"textAlign": "center", "color": "white", "flex": "1"}),
+        html.Button(
+            "🔄 Refresh Data",
+            id="refresh-button",
+            n_clicks=0,
+            style={
+                "position": "absolute",
+                "right": "20px",
+                "top": "20px",
+                "padding": "8px 16px",
+                "backgroundColor": "#4CAF50",
+                "color": "white",
+                "border": "none",
+                "borderRadius": "4px",
+                "cursor": "pointer",
+                "fontSize": "14px"
+            }
+        )
+    ], style={"position": "relative", "paddingTop": "40px"}),
 
     dcc.Tabs(
-        id="tabs", 
-        value="all-users-view", 
+        id="tabs",
+        value="all-users-view",
         children=[
             dcc.Tab(label="All Users Stats", value="all-users-view"),
             dcc.Tab(label="User Stats", value="single-user-view"),
@@ -595,6 +616,18 @@ app.layout = html.Div([
 
     html.Div(id="tab-content", style={"padding": "20px"})
 ])
+
+# -------------------------------
+# 🔄 Callback for Refresh Button
+# -------------------------------
+@app.callback(
+    Output("url", "pathname"),
+    Input("refresh-button", "n_clicks"),
+    prevent_initial_call=True
+)
+def refresh_page(n_clicks):
+    return "/"
+
 
 # -------------------------------
 # 📊 Callback for Pitch + Summary

@@ -1,7 +1,7 @@
 import re
 from pathlib import Path
 
-SCRIPT_PATH = Path(__file__).resolve().parents[1] / "FPLDraftDash.py"
+SCRIPT_PATH = Path(__file__).resolve().parents[1] / "app.py"
 
 
 def test_season_year_is_global_parameter():

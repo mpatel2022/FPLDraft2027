@@ -1,13 +1,15 @@
 import pandas as pd
 import dash
-from dash import dcc, html, Input, Output, dash_table
+from dash import dcc, html, Input, Output, State, ctx, no_update, dash_table
 import dash_bootstrap_components as dbc
 import plotly.graph_objects as go
 import numpy as np
 import datetime
+import logging
 import requests
 import plotly.express as px
 import pickle
+import threading
 from pathlib import Path
 import truststore
 import yaml
@@ -27,6 +29,17 @@ BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / SEASON_YEAR
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 CONFIG_PATH = DATA_DIR / 'config.yaml'
+
+LOG_DIR = BASE_DIR / 'logs'
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s %(levelname)s [%(threadName)s] %(name)s: %(message)s',
+    handlers=[logging.FileHandler(LOG_DIR / 'app.log', encoding='utf-8'), logging.StreamHandler()],
+)
+logger = logging.getLogger(__name__)
+
+REQUEST_TIMEOUT_SECONDS = 30
 
 with CONFIG_PATH.open('r', encoding='utf-8') as config_file:
     config = yaml.safe_load(config_file) or {}
@@ -108,10 +121,14 @@ def get_shirt_image(team_code):
     return f"/assets/{get_shirt_logo_name(team_code)}"
 
 
-def save_image_data(image_url, image_name, folder):
-    img_data = requests.get(f'{image_url}{image_name}').content
+def save_image_data(image_url, image_name, folder, session):
+    response = session.get(f'{image_url}{image_name}', timeout=REQUEST_TIMEOUT_SECONDS)
+    if not response.ok:
+        # Keep the existing image rather than overwriting it with an error page
+        logger.warning("Could not download %s%s: HTTP %s", image_url, image_name, response.status_code)
+        return
     with open(f'{folder}{image_name}', 'wb') as handler:
-        handler.write(img_data)    
+        handler.write(response.content)
 
 
 def get_all_gameweek_summary(df):
@@ -427,142 +444,230 @@ def get_aggregate_data_based_on_filter(merged_df, filter_type, column_name):
     return agg, title    
 
 
-if refresh_data:
-    r = requests.get(url_all)
-    all_data = r.json()
-
-    with open(DATA_DIR / 'metadata.pickle', 'wb') as handle:
-        pickle.dump(all_data, handle, protocol=pickle.HIGHEST_PROTOCOL)
-
-    # Get the team logos and store in resources
-    shirt_logos_url = "https://fantasy.premierleague.com/dist/img/shirts/standard/"
-    team_badges_url = "https://resources.premierleague.com/premierleague25/badges/"
-    for i in all_data['teams']:
-        team_code = i['code']
-
-        shirt_logo_name = get_shirt_logo_name(team_code)
-        save_image_data(shirt_logos_url, shirt_logo_name, IMAGES_LOCATION)
-        save_image_data(team_badges_url, f'{team_code}.webp', IMAGES_LOCATION)        
-
-with open(DATA_DIR / 'metadata.pickle', 'rb') as handle:
-    all_data = pickle.load(handle)    
-
-next_gameweek = all_data['events']['next']
-if not next_gameweek:
-    next_gameweek = 39
-gameweeks = np.arange(next_gameweek)[1:]
-
-# Mapping
-# Teams
-team_map = pd.DataFrame({i['id']: [i['short_name'], 
-                                   i['name'],
-                                   i['code']]  
-                        for i in all_data['teams']}).T
-team_map.columns = ['team_short_name', 'team_name', 'team_code']
-
-player_map = pd.DataFrame({i['id']: ['{} {}'.format(i['first_name'],i['second_name']), 
-                                     i['web_name'],
-                                     i['code'],
-                                     i['team'],
-                                     i['element_type']]  
-                          for i in all_data['elements']}).T
-player_map.columns = ['full_name', 'web_name', 'player_code', 'team_id', 'position_id']
-all_players = player_map.index.tolist()
+def get_gameweeks(metadata):
+    """Return the next gameweek and the array of completed gameweeks."""
+    next_gw = metadata['events']['next']
+    if not next_gw:
+        next_gw = 39
+    return next_gw, np.arange(next_gw)[1:]
 
 
-positions_map = pd.Series({i['id']:i['plural_name_short'] 
-                          for i in all_data['element_types']},
-                          name='position')
+def fetch_json(session, url):
+    response = session.get(url, timeout=REQUEST_TIMEOUT_SECONDS)
+    response.raise_for_status()
+    return response.json()
 
-player_map = pd.merge(player_map, 
-                      positions_map,
-                      left_on=['position_id'],
-                      right_index=True).rename(columns={'position_y': 'position'})
 
-player_map = pd.merge(player_map, 
-                      team_map,
-                      left_on=['team_id'],
-                      right_index=True)
+def fetch_data(report_progress=None):
+    """Download the latest data from the FPL Draft API and save it to DATA_DIR.
 
-player_map['player_name'] = [f'{x} ({y})' for x, y in zip(player_map['web_name'], player_map['team_short_name'])]
+    Everything is downloaded before any pickle is written, so a failure part way
+    through leaves the existing files untouched.
+    """
+    def report(message):
+        logger.info(message)
+        if report_progress:
+            report_progress(message)
 
-if refresh_data:
-    player_history = []
-    for player in all_players:
-        url_player = 'https://draft.premierleague.com/api/element-summary/{}'.format(player)
-        r = requests.get(url_player)
-        
-        if r.status_code == 502:
-            continue
-        player_data_json = r.json()['history']   
-        data_length = len(player_data_json)
-        for i in np.arange(data_length):
-            player_history = player_history + [pd.Series(player_data_json[i])]
-    player_history = pd.concat(player_history,axis=1).T.rename(columns={'event':'gameweek'})        
-    player_history.to_pickle(DATA_DIR / 'player_history.pickle')    
+    with requests.Session() as session:
+        report("Fetching metadata")
+        metadata = fetch_json(session, url_all)
 
-    url_league = 'https://draft.premierleague.com/api/league/{}/details'.format(league_id)
-    r = requests.get(url_league)
-    league_data = r.json()
-    with open(DATA_DIR / 'league_data.pickle', 'wb') as handle:
-        pickle.dump(league_data, handle, protocol=pickle.HIGHEST_PROTOCOL)
+        # Get the team logos and store in resources
+        report("Fetching team images")
+        shirt_logos_url = "https://fantasy.premierleague.com/dist/img/shirts/standard/"
+        team_badges_url = "https://resources.premierleague.com/premierleague25/badges/"
+        for team in metadata['teams']:
+            team_code = team['code']
+            save_image_data(shirt_logos_url, get_shirt_logo_name(team_code), IMAGES_LOCATION, session)
+            save_image_data(team_badges_url, f'{team_code}.webp', IMAGES_LOCATION, session)
 
-    for gameweek in gameweeks:
-        team_positions_path = DATA_DIR / f'team_positions_history_gw{gameweek}.pickle'
-        if not team_positions_path.exists():
+        player_ids = [element['id'] for element in metadata['elements']]
+        player_history_rows = []
+        for player_number, player_id in enumerate(player_ids, start=1):
+            if player_number % 25 == 0 or player_number == len(player_ids):
+                report(f"Fetching players {player_number}/{len(player_ids)}")
+            url_player = f'https://draft.premierleague.com/api/element-summary/{player_id}'
+            response = session.get(url_player, timeout=REQUEST_TIMEOUT_SECONDS)
+            if response.status_code == 502:
+                logger.warning("Skipping player %s: API returned 502", player_id)
+                continue
+            response.raise_for_status()
+            player_history_rows.extend(pd.Series(row) for row in response.json()['history'])
+        player_history = pd.concat(player_history_rows, axis=1).T.rename(columns={'event': 'gameweek'})
+
+        report("Fetching league details")
+        league_details = fetch_json(session, f'https://draft.premierleague.com/api/league/{league_id}/details')
+
+        # Picks are fixed once a gameweek has started, so only fetch gameweeks not already saved
+        _, completed_gameweeks = get_gameweeks(metadata)
+        new_team_positions = {}
+        for gameweek in completed_gameweeks:
+            team_positions_path = DATA_DIR / f'team_positions_history_gw{gameweek}.pickle'
+            if team_positions_path.exists():
+                continue
+            report(f"Fetching teams for GW{gameweek}")
             team_positions_array = []
             for user_id in user_ids:
-                url_team = 'https://draft.premierleague.com/api/entry/{}/event/{}'.format(user_id, gameweek)
-                r = requests.get(url_team)
-                
-                team_data_json = r.json()
-                team_positions = pd.Series({team_data_json['picks'][i]['position']:team_data_json['picks'][i]['element'] for i in np.arange(len(team_data_json['picks']))})
+                team_data_json = fetch_json(session, f'https://draft.premierleague.com/api/entry/{user_id}/event/{gameweek}')
+                team_positions = pd.Series({pick['position']: pick['element'] for pick in team_data_json['picks']})
                 team_positions['user_id'] = user_id
                 team_positions['gameweek'] = gameweek
-                                    
                 team_positions_array.append(team_positions)
-            team_positions_history = pd.concat(team_positions_array,axis=1).T
-            team_positions_history = team_positions_history.set_index(['user_id','gameweek']).stack().reset_index().rename(columns={'level_2':'position',0:'element'})
-            team_positions_history.to_pickle(team_positions_path)
+            team_positions_history = pd.concat(team_positions_array, axis=1).T
+            team_positions_history = team_positions_history.set_index(['user_id', 'gameweek']).stack().reset_index().rename(columns={'level_2': 'position', 0: 'element'})
+            new_team_positions[team_positions_path] = team_positions_history
+
+    report("Saving data")
+    with open(DATA_DIR / 'metadata.pickle', 'wb') as handle:
+        pickle.dump(metadata, handle, protocol=pickle.HIGHEST_PROTOCOL)
+    player_history.to_pickle(DATA_DIR / 'player_history.pickle')
+    with open(DATA_DIR / 'league_data.pickle', 'wb') as handle:
+        pickle.dump(league_details, handle, protocol=pickle.HIGHEST_PROTOCOL)
+    for team_positions_path, team_positions_history in new_team_positions.items():
+        team_positions_history.to_pickle(team_positions_path)
 
 
-with open(DATA_DIR / 'league_data.pickle', 'rb') as handle:
-    league_data = pickle.load(handle)    
+def load_data():
+    """Load the saved pickles from DATA_DIR and build the dashboard data."""
+    with open(DATA_DIR / 'metadata.pickle', 'rb') as handle:
+        metadata = pickle.load(handle)
 
-with open(DATA_DIR / 'player_history.pickle', 'rb') as handle:
-    player_df = pickle.load(handle)    
+    next_gw, completed_gameweeks = get_gameweeks(metadata)
 
-team_array = []
-for gameweek in gameweeks:
-    with open(DATA_DIR / f'team_positions_history_gw{gameweek}.pickle', 'rb') as handle:
-        team_array.append(pickle.load(handle))    
+    # Mapping
+    # Teams
+    team_map = pd.DataFrame({team['id']: [team['short_name'],
+                                          team['name'],
+                                          team['code']]
+                            for team in metadata['teams']}).T
+    team_map.columns = ['team_short_name', 'team_name', 'team_code']
 
-team_df = pd.concat(team_array)
+    player_map = pd.DataFrame({element['id']: ['{} {}'.format(element['first_name'], element['second_name']),
+                                               element['web_name'],
+                                               element['code'],
+                                               element['team'],
+                                               element['element_type']]
+                              for element in metadata['elements']}).T
+    player_map.columns = ['full_name', 'web_name', 'player_code', 'team_id', 'position_id']
+
+    positions_map = pd.Series({element_type['id']: element_type['plural_name_short']
+                              for element_type in metadata['element_types']},
+                              name='position')
+
+    player_map = pd.merge(player_map,
+                          positions_map,
+                          left_on=['position_id'],
+                          right_index=True).rename(columns={'position_y': 'position'})
+
+    player_map = pd.merge(player_map,
+                          team_map,
+                          left_on=['team_id'],
+                          right_index=True)
+
+    player_map['player_name'] = [f'{x} ({y})' for x, y in zip(player_map['web_name'], player_map['team_short_name'])]
+
+    with open(DATA_DIR / 'player_history.pickle', 'rb') as handle:
+        player_df = pickle.load(handle)
+
+    team_array = []
+    for gameweek in completed_gameweeks:
+        with open(DATA_DIR / f'team_positions_history_gw{gameweek}.pickle', 'rb') as handle:
+            team_array.append(pickle.load(handle))
+
+    team_df = pd.concat(team_array)
+
+    team_df['user_name'] = team_df['user_id'].map(USER_MAP)
+    team_df.rename(columns={"user_name": "User",
+                            "gameweek": "Gameweek",
+                            "position": "Position",
+                            "element": "PlayerID"}, inplace=True)
+
+    player_df.rename(columns={"element": "PlayerID",
+                              "gameweek": "Gameweek",
+                              "web_name": "name"}, inplace=True)
+
+    player_map.rename(columns={"web_name": "name"}, inplace=True)
+
+    # Merge datasets
+    merged = pd.merge(team_df, player_df, on=["PlayerID", "Gameweek"], how="left")
+    merged = pd.merge(merged, player_map, left_on=["PlayerID"], right_index=True, how="left")
+    merged.sort_values(by=["User", "Gameweek", "Position"], inplace=True)
+    merged = pd.DataFrame(merged.to_dict())
+
+    merged['defensive_contribution_points'] = [2 if contribution >= 10 else 0 for contribution in merged['defensive_contribution']]
+
+    return {
+        'next_gameweek': next_gw,
+        'merged_df': merged,
+        'user_options': sorted(merged["User"].unique()),
+        'gameweek_options': ['All'] + sorted(merged["Gameweek"].unique(), reverse=True),
+    }
+
+
+def apply_data(data):
+    """Swap in newly loaded data; callbacks read these globals on every call."""
+    global next_gameweek, merged_df, user_options, gameweek_options
+    next_gameweek = data['next_gameweek']
+    merged_df = data['merged_df']
+    user_options = data['user_options']
+    gameweek_options = data['gameweek_options']
+
+
+# -------------------------------
+# 🔄 Background data refresh
+# -------------------------------
+# Shared between the refresh thread and the Dash callbacks, guarded by refresh_lock
+refresh_lock = threading.Lock()
+refresh_state = {'running': False, 'message': '', 'version': 0}
+
+
+def set_refresh_message(message):
+    with refresh_lock:
+        refresh_state['message'] = message
+
+
+def get_refresh_state():
+    with refresh_lock:
+        return dict(refresh_state)
+
+
+def run_refresh():
+    try:
+        fetch_data(report_progress=set_refresh_message)
+        set_refresh_message("Building dashboard data")
+        apply_data(load_data())
+        with refresh_lock:
+            refresh_state['version'] += 1
+            refresh_state['message'] = f"Updated {datetime.datetime.now().astimezone():%H:%M}"
+        logger.info("Data refresh complete")
+    except Exception:
+        logger.exception("Data refresh failed")
+        set_refresh_message("Refresh failed - see logs")
+    finally:
+        with refresh_lock:
+            refresh_state['running'] = False
+
+
+def start_refresh():
+    """Start a background refresh unless one is already running. Returns True if started."""
+    with refresh_lock:
+        if refresh_state['running']:
+            return False
+        refresh_state['running'] = True
+        refresh_state['message'] = "Starting refresh"
+    logger.info("Starting background data refresh")
+    threading.Thread(target=run_refresh, name='data-refresh', daemon=True).start()
+    return True
 
 
 # -------------------------------
 # 📦 Load and Prepare the Data
 # -------------------------------
-team_df['user_name'] = team_df['user_id'].map(USER_MAP)
-team_df.rename(columns={"user_name": "User", 
-                        "gameweek": "Gameweek", 
-                        "position": "Position", 
-                        "element": "PlayerID"}, inplace=True)
+if refresh_data:
+    fetch_data()
 
-player_df.rename(columns={"element": "PlayerID", 
-                          "gameweek": "Gameweek", 
-                          "web_name": "name"}, inplace=True)
-
-player_map.rename(columns={"web_name": "name"}, inplace=True)
-
-
-# Merge datasets
-merged_df = pd.merge(team_df, player_df, on=["PlayerID", "Gameweek"], how="left")
-merged_df = pd.merge(merged_df, player_map, left_on=["PlayerID"], right_index=True, how="left")
-merged_df.sort_values(by=["User", "Gameweek", "Position"], inplace=True)
-merged_df = pd.DataFrame(merged_df.to_dict())
-
-merged_df['defensive_contribution_points'] = [2 if i >= 10 else 0 for i in merged_df['defensive_contribution']]
+apply_data(load_data())
 
 # -------------------------------
 # 🚀 Initialize Dash App
@@ -573,36 +678,34 @@ app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP])
 
 server = app.server  # for deployment
 
-# Dropdown options
-user_options = sorted(merged_df["User"].unique())
-gameweek_options = ['All'] + sorted(merged_df["Gameweek"].unique(), reverse=True)
-
 # -------------------------------
 # 🎨 App Layout
 # -------------------------------
 app.layout = html.Div([
-    dcc.Location(id="url", refresh=False),
+    # Polls the background refresh while it runs; the version store changes when new data is ready
+    dcc.Interval(id="refresh-poll", interval=1000, disabled=True),
+    dcc.Store(id="data-version", data=0),
 
     html.Div([
         html.H2(f"FPL Draft {SEASON_YEAR}", style={"textAlign": "center", "color": "white", "flex": "1"}),
-        html.Button(
-            "↻ Refresh",
-            id="refresh-button",
-            n_clicks=0,
-            style={
-                "position": "absolute",
-                "right": "20px",
-                "top": "20px",
-                "padding": "4px 12px",
-                "backgroundColor": "transparent",
-                "color": "#999",
-                "border": "1px solid #555",
-                "borderRadius": "3px",
-                "cursor": "pointer",
-                "fontSize": "12px",
-                "fontWeight": "normal"
-            }
-        )
+        html.Div([
+            html.Span(id="refresh-status", style={"color": "#777", "fontSize": "12px", "marginRight": "10px"}),
+            html.Button(
+                "↻ Refresh",
+                id="refresh-button",
+                n_clicks=0,
+                style={
+                    "padding": "4px 12px",
+                    "backgroundColor": "transparent",
+                    "color": "#999",
+                    "border": "1px solid #555",
+                    "borderRadius": "3px",
+                    "cursor": "pointer",
+                    "fontSize": "12px",
+                    "fontWeight": "normal"
+                }
+            )
+        ], style={"position": "absolute", "right": "20px", "top": "20px", "display": "flex", "alignItems": "center"})
     ], style={"position": "relative", "paddingTop": "40px"}),
 
     dcc.Tabs(
@@ -622,12 +725,23 @@ app.layout = html.Div([
 # 🔄 Callback for Refresh Button
 # -------------------------------
 @app.callback(
-    Output("url", "pathname"),
+    Output("refresh-status", "children"),
+    Output("refresh-poll", "disabled"),
+    Output("refresh-button", "disabled"),
+    Output("data-version", "data"),
     Input("refresh-button", "n_clicks"),
+    Input("refresh-poll", "n_intervals"),
+    State("data-version", "data"),
     prevent_initial_call=True
 )
-def refresh_page(n_clicks):
-    return "/"
+def handle_refresh(n_clicks, n_intervals, current_version):
+    # Starts the refresh in a background thread and returns straight away, so the
+    # rest of the app keeps working off the current data until the new data is ready
+    if ctx.triggered_id == "refresh-button":
+        start_refresh()
+    state = get_refresh_state()
+    new_version = state['version'] if state['version'] != current_version else no_update
+    return state['message'], not state['running'], state['running'], new_version
 
 
 # -------------------------------
@@ -635,9 +749,10 @@ def refresh_page(n_clicks):
 # -------------------------------
 @app.callback(
     Output("tab-content", "children"),
-    Input("tabs", "value")
+    Input("tabs", "value"),
+    Input("data-version", "data")
 )
-def render_tab(tab):
+def render_tab(tab, data_version):
     if tab == "all-users-view":
         tab_data = html.Div([
             html.H4("Performance Stats (All Gameweeks)"),
